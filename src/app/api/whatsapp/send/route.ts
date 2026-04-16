@@ -205,8 +205,12 @@ export async function POST(request: Request) {
       )
     }
 
-    // Update conversation
-    await supabase
+    // Update conversation. We don't fail the whole request if this
+    // throws — the message is already sent to Meta and saved in the DB,
+    // so returning an error here would be misleading. Just log it so
+    // the conversation list might briefly show stale preview text until
+    // the next realtime event catches up.
+    const { error: convUpdateError } = await supabase
       .from('conversations')
       .update({
         last_message_text: content_text || `[${message_type}]`,
@@ -214,6 +218,12 @@ export async function POST(request: Request) {
         updated_at: new Date().toISOString(),
       })
       .eq('id', conversation_id)
+    if (convUpdateError) {
+      console.warn(
+        '[whatsapp/send] Conversation update after send failed:',
+        convUpdateError.message
+      )
+    }
 
     return NextResponse.json({
       success: true,

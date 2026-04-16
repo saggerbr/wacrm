@@ -1,13 +1,13 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { decrypt } from '@/lib/whatsapp/encryption'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import { getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { normalizePhone, phonesMatch } from '@/lib/whatsapp/phone-utils'
 
-// Lazy-initialized to avoid build-time crash when env vars are missing
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _adminClient: any = null
-function supabaseAdmin() {
+// Lazy-initialized to avoid build-time crash when env vars aren't
+// injected (e.g. on a fresh CI runner building a Docker image).
+let _adminClient: SupabaseClient | null = null
+function supabaseAdmin(): SupabaseClient {
   if (!_adminClient) {
     _adminClient = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -86,16 +86,17 @@ export async function GET(request: Request) {
     }
 
     // Check if any config's verify_token matches
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const matched = configs.some((config: any) => {
-      if (!config.verify_token) return false
-      try {
-        const decrypted = decrypt(config.verify_token)
-        return decrypted === verifyToken
-      } catch {
-        return false
+    const matched = (configs as Array<{ verify_token: string | null }>).some(
+      (config) => {
+        if (!config.verify_token) return false
+        try {
+          const decrypted = decrypt(config.verify_token)
+          return decrypted === verifyToken
+        } catch {
+          return false
+        }
       }
-    })
+    )
 
     if (matched) {
       // Return challenge as plain text
@@ -208,7 +209,7 @@ async function processMessage(
   const contactName = contact.profile.name
 
   // Parse message content based on type
-  const { contentText, mediaUrl, mediaType } = await parseMessageContent(
+  const { contentText, mediaUrl } = await parseMessageContent(
     message,
     accessToken
   )
@@ -228,15 +229,10 @@ async function processMessage(
   )
   if (!conversation) return
 
-  // Insert message — field names MUST match the messages table schema
+  // Insert message — field names must match the messages table schema
   // (see supabase/migrations/001_initial_schema.sql):
   //   conversation_id, sender_type, content_type, content_text,
   //   media_url, template_name, message_id, status, created_at
-  // `mediaType` is intentionally unused — the schema has no media_type
-  // column; the MIME type is only used to construct the proxy URL during
-  // parseMessageContent. Silence the unused-var warning:
-  void mediaType
-
   // The messages.content_type CHECK constraint only allows:
   //   text, image, document, audio, video, location, template
   // Map incoming WhatsApp types that aren't in that list to the closest
@@ -282,21 +278,20 @@ async function processMessage(
   }
 }
 
+interface ParsedMessage {
+  contentText: string | null
+  mediaUrl: string | null
+}
+
 async function parseMessageContent(
   message: WhatsAppMessage,
   accessToken: string
-): Promise<{
-  contentText: string | null
-  mediaUrl: string | null
-  mediaType: string | null
-}> {
-  // getMediaUrl signature is (mediaId, accessToken) — earlier code had
-  // the args swapped, so every verification hit an invalid Meta URL and
-  // fell through to the catch block, leaving mediaUrl as null. That's
-  // why images showed up as empty bubbles in the inbox.
-  const verifyAndBuildUrl = async (
-    mediaId: string
-  ): Promise<string | null> => {
+): Promise<ParsedMessage> {
+  // Verify a media asset exists on Meta's side and, if so, return the
+  // app-local proxy URL that the inbox UI can load. We don't hand the
+  // MIME type back because the messages schema has no column for it —
+  // the proxy endpoint sets Content-Type from Meta at fetch time.
+  const verifyAndBuildUrl = async (mediaId: string): Promise<string | null> => {
     try {
       await getMediaUrl({ mediaId, accessToken })
       return `/api/whatsapp/media/${mediaId}`
@@ -309,94 +304,67 @@ async function parseMessageContent(
     }
   }
 
+  const empty: ParsedMessage = { contentText: null, mediaUrl: null }
+
   switch (message.type) {
     case 'text':
-      return {
-        contentText: message.text?.body || null,
-        mediaUrl: null,
-        mediaType: null,
-      }
+      return { contentText: message.text?.body || null, mediaUrl: null }
 
     case 'image':
-      if (message.image?.id) {
-        return {
-          contentText: message.image.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.image.id),
-          mediaType: message.image.mime_type,
-        }
+      if (!message.image?.id) return empty
+      return {
+        contentText: message.image.caption || null,
+        mediaUrl: await verifyAndBuildUrl(message.image.id),
       }
-      return { contentText: null, mediaUrl: null, mediaType: null }
 
     case 'video':
-      if (message.video?.id) {
-        return {
-          contentText: message.video.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.video.id),
-          mediaType: message.video.mime_type,
-        }
+      if (!message.video?.id) return empty
+      return {
+        contentText: message.video.caption || null,
+        mediaUrl: await verifyAndBuildUrl(message.video.id),
       }
-      return { contentText: null, mediaUrl: null, mediaType: null }
 
     case 'document':
-      if (message.document?.id) {
-        return {
-          contentText:
-            message.document.caption || message.document.filename || null,
-          mediaUrl: await verifyAndBuildUrl(message.document.id),
-          mediaType: message.document.mime_type,
-        }
+      if (!message.document?.id) return empty
+      return {
+        contentText:
+          message.document.caption || message.document.filename || null,
+        mediaUrl: await verifyAndBuildUrl(message.document.id),
       }
-      return { contentText: null, mediaUrl: null, mediaType: null }
 
     case 'audio':
-      if (message.audio?.id) {
-        return {
-          contentText: null,
-          mediaUrl: await verifyAndBuildUrl(message.audio.id),
-          mediaType: message.audio.mime_type,
-        }
+      if (!message.audio?.id) return empty
+      return {
+        contentText: null,
+        mediaUrl: await verifyAndBuildUrl(message.audio.id),
       }
-      return { contentText: null, mediaUrl: null, mediaType: null }
 
     case 'sticker':
       // Stickers are images under the hood. Treat them as such so the
       // MessageBubble renders the <img>. The caller maps the DB
       // content_type to 'image' for the CHECK constraint.
-      if (message.sticker?.id) {
-        return {
-          contentText: null,
-          mediaUrl: await verifyAndBuildUrl(message.sticker.id),
-          mediaType: message.sticker.mime_type,
-        }
+      if (!message.sticker?.id) return empty
+      return {
+        contentText: null,
+        mediaUrl: await verifyAndBuildUrl(message.sticker.id),
       }
-      return { contentText: null, mediaUrl: null, mediaType: null }
 
-    case 'location':
-      if (message.location) {
-        const loc = message.location
-        const locationText = [loc.name, loc.address, `${loc.latitude},${loc.longitude}`]
-          .filter(Boolean)
-          .join(' - ')
-        return {
-          contentText: locationText,
-          mediaUrl: null,
-          mediaType: null,
-        }
-      }
-      return { contentText: null, mediaUrl: null, mediaType: null }
+    case 'location': {
+      const loc = message.location
+      if (!loc) return empty
+      const locationText = [loc.name, loc.address, `${loc.latitude},${loc.longitude}`]
+        .filter(Boolean)
+        .join(' - ')
+      return { contentText: locationText, mediaUrl: null }
+    }
 
     case 'reaction':
-      return {
-        contentText: message.reaction?.emoji || null,
-        mediaUrl: null,
-        mediaType: null,
-      }
+      return { contentText: message.reaction?.emoji || null, mediaUrl: null }
 
     default:
       return {
         contentText: `[Unsupported message type: ${message.type}]`,
         mediaUrl: null,
-        mediaType: null,
       }
   }
 }
@@ -418,8 +386,8 @@ async function findOrCreateContact(
   }
 
   // Use phonesMatch for flexible matching
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const existingContact = contacts?.find((c: any) => phonesMatch(c.phone, phone))
+  const existingContact = (contacts as Array<{ id: string; name: string | null; phone: string }> | null)
+    ?.find((c) => phonesMatch(c.phone, phone))
 
   if (existingContact) {
     // Update name if it changed

@@ -1,21 +1,21 @@
 /**
- * Sanitize phone number for Meta WhatsApp API.
- * Meta requires digits only — no + prefix, no spaces, no dashes.
- * e.g. "+370 63949836" → "37063949836"
+ * Strip a phone number down to digits only.
+ *
+ * Used in two places:
+ *  - Sending to Meta's WhatsApp API, which requires digits-only,
+ *    no + prefix, no spaces, no dashes (e.g. "+370 63 949 836" → "37063949836").
+ *  - Normalizing before comparing two user-entered numbers.
+ *
+ * Both uses want the same thing, so we expose two names pointing at
+ * the same implementation. Callers at the call site pick the one that
+ * documents intent.
  */
 export function sanitizePhoneForMeta(phone: string): string {
   if (!phone) return ''
   return phone.replace(/\D/g, '')
 }
 
-/**
- * Normalize phone number by removing all non-digit characters.
- * Used for comparing phone numbers in different formats.
- */
-export function normalizePhone(phone: string): string {
-  if (!phone) return ''
-  return phone.replace(/\D/g, '')
-}
+export const normalizePhone = sanitizePhoneForMeta
 
 /**
  * Compare two phone numbers accounting for trunk prefix differences.

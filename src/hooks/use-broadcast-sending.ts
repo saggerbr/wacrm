@@ -147,8 +147,14 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
           .from('broadcast_recipients')
           .insert(batch);
 
+        // Fail-fast: if we continued on error, the broadcast would only
+        // reach a subset of intended recipients while the UI reports
+        // success. Better to abort and surface the DB error to the user
+        // so they can retry with a consistent state.
         if (recipientError) {
-          console.error('Failed to insert recipient batch:', recipientError);
+          throw new Error(
+            `Failed to insert recipient batch (rows ${i}-${i + batch.length}): ${recipientError.message}`
+          );
         }
       }
 
@@ -201,38 +207,67 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
             throw new Error(data.error || 'Broadcast API request failed');
           }
 
-          // Update individual recipient statuses based on results
+          // Update recipient statuses. Bulk-update all "sent" in one
+          // query; individual updates for failures because they carry
+          // per-recipient error messages. Previously this was one UPDATE
+          // per recipient (50 round-trips per batch), which made large
+          // broadcasts quadratic.
           if (data.results) {
+            const sentIds: string[] = [];
+            const failedResults: Array<{ id: string; error: string | null }> = [];
+
             for (let j = 0; j < data.results.length; j++) {
               const result = data.results[j];
               const recipient = batch[j];
               if (!recipient) continue;
 
-              const newStatus = result.status === 'sent' ? 'sent' : 'failed';
-              if (newStatus === 'sent') sentCount++;
-              else failedCount++;
+              if (result.status === 'sent') {
+                sentIds.push(recipient.id);
+                sentCount++;
+              } else {
+                failedResults.push({ id: recipient.id, error: result.error ?? null });
+                failedCount++;
+              }
+            }
 
-              await supabase
+            if (sentIds.length > 0) {
+              const { error } = await supabase
                 .from('broadcast_recipients')
                 .update({
-                  status: newStatus,
-                  sent_at: newStatus === 'sent' ? new Date().toISOString() : null,
-                  error_message: result.error ?? null,
+                  status: 'sent',
+                  sent_at: new Date().toISOString(),
+                  error_message: null,
                 })
-                .eq('id', recipient.id);
+                .in('id', sentIds);
+              if (error) console.error('Failed to mark batch sent:', error);
+            }
+
+            // Failures need individual writes because error_message differs.
+            // Keeping the awaits sequential so we don't blow up Supabase
+            // with 50 parallel write connections on large broadcasts.
+            for (const fail of failedResults) {
+              const { error } = await supabase
+                .from('broadcast_recipients')
+                .update({ status: 'failed', error_message: fail.error })
+                .eq('id', fail.id);
+              if (error) console.error('Failed to mark recipient failed:', error);
             }
           }
         } catch (err) {
-          // Mark entire batch as failed
-          for (const recipient of batch) {
-            failedCount++;
-            await supabase
+          // API itself failed — mark the whole batch as failed in a
+          // single query with the same error message for everyone.
+          const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+          const batchIds = batch.map((r) => r.id);
+          failedCount += batchIds.length;
+
+          if (batchIds.length > 0) {
+            const { error: updateError } = await supabase
               .from('broadcast_recipients')
-              .update({
-                status: 'failed',
-                error_message: err instanceof Error ? err.message : 'Unknown error',
-              })
-              .eq('id', recipient.id);
+              .update({ status: 'failed', error_message: errorMessage })
+              .in('id', batchIds);
+            if (updateError) {
+              console.error('Failed to mark batch failed:', updateError);
+            }
           }
         }
 
