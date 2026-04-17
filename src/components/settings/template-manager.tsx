@@ -53,14 +53,42 @@ interface TemplateFormData {
   footer_text: string;
 }
 
+// Meta's language codes are exact — "en" and "en_US" are distinct and a
+// template approved under one will be rejected if you send with the other
+// (Graph API error #132001 "Template name does not exist in the
+// translation"). Default to en_US to match the DB default on
+// message_templates.language and the broadcasts sender's fallback.
 const emptyForm: TemplateFormData = {
   name: '',
   category: 'Marketing',
-  language: 'en',
+  language: 'en_US',
   body_text: '',
   header_type: '',
   footer_text: '',
 };
+
+// Common Meta template language codes. The field still accepts any
+// string — this just offers autocomplete for the usual suspects. Full
+// list: https://developers.facebook.com/docs/whatsapp/api/messages/message-templates#supported-languages
+const COMMON_LANGUAGE_CODES = [
+  'en_US',
+  'en_GB',
+  'en',
+  'es',
+  'es_ES',
+  'es_MX',
+  'fr',
+  'fr_FR',
+  'de',
+  'it',
+  'pt_BR',
+  'pt_PT',
+  'nl',
+  'pl',
+  'ru',
+  'tr',
+  'lt',
+];
 
 export function TemplateManager() {
   const supabase = createClient();
@@ -123,7 +151,7 @@ export function TemplateManager() {
         user_id: user.id,
         name: form.name.trim(),
         category: form.category,
-        language: form.language.trim() || 'en',
+        language: form.language.trim() || 'en_US',
         body_text: form.body_text.trim(),
         header_type: form.header_type || null,
         footer_text: form.footer_text.trim() || null,
@@ -285,11 +313,22 @@ export function TemplateManager() {
               <div className="space-y-2">
                 <Label className="text-slate-300">Language</Label>
                 <Input
-                  placeholder="en"
+                  list="template-language-codes"
+                  placeholder="en_US"
                   value={form.language}
                   onChange={(e) => setForm({ ...form, language: e.target.value })}
                   className="bg-slate-800 border-slate-700 text-white placeholder:text-slate-500"
                 />
+                <datalist id="template-language-codes">
+                  {COMMON_LANGUAGE_CODES.map((code) => (
+                    <option key={code} value={code} />
+                  ))}
+                </datalist>
+                <p className="text-[11px] text-slate-500">
+                  Must match the exact language code the template is approved
+                  under on Meta — e.g. <code>en_US</code> and <code>en</code>{' '}
+                  are distinct.
+                </p>
               </div>
             </div>
 
