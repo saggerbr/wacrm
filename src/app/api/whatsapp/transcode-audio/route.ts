@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,7 +27,13 @@ const MAX_INPUT_BYTES = 16 * 1024 * 1024
  * hosts where the bundled binary can't run (e.g. a system ffmpeg).
  */
 function resolveFfmpegPath(): string | null {
-  return process.env.FFMPEG_PATH || ffmpegStatic || null
+  const candidate = process.env.FFMPEG_PATH || ffmpegStatic || null
+  // A resolved path that doesn't exist on disk is the common failure:
+  // `ffmpeg-static` exports a path but its postinstall download was
+  // skipped (npm `ignore-scripts`). Treat that as "no binary" so the
+  // caller gets the actionable "unavailable" message, not a raw ENOENT.
+  if (!candidate || !existsSync(candidate)) return null
+  return candidate
 }
 
 function runFfmpeg(binary: string, args: string[]): Promise<void> {
@@ -86,10 +93,17 @@ export async function POST(request: Request) {
 
     const ffmpegPath = resolveFfmpegPath()
     if (!ffmpegPath) {
-      console.error('[transcode-audio] ffmpeg binary not found')
+      console.error(
+        '[transcode-audio] ffmpeg binary not found. Run `npm rebuild ffmpeg-static` ' +
+          '(its postinstall downloads the binary) or set FFMPEG_PATH to a system ffmpeg, ' +
+          'then restart the server.',
+      )
       return NextResponse.json(
-        { error: 'Audio transcoding is unavailable on this server.' },
-        { status: 500 },
+        {
+          error:
+            'Voice transcoding is unavailable — ffmpeg is not installed on the server.',
+        },
+        { status: 503 },
       )
     }
 
@@ -140,8 +154,11 @@ export async function POST(request: Request) {
     const message =
       error instanceof Error ? error.message : 'Audio transcoding failed'
     console.error('[transcode-audio] failed:', message)
+    // Surface the underlying ffmpeg/stderr reason — this is an internal
+    // operator tool, and a generic "failed" hid actionable causes (bad
+    // codec, missing libopus, ENOENT) during the beta.
     return NextResponse.json(
-      { error: 'Failed to process the recording.' },
+      { error: `Failed to process the recording: ${message}` },
       { status: 500 },
     )
   }
