@@ -352,6 +352,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_run_per_contact
 -- assignment + audit) but is no longer consulted for isolation.
 -- ============================================================
 
+-- Make the RLS rewrite re-runnable. CREATE POLICY has no IF NOT EXISTS
+-- form, and the DROP statements below only name the *legacy* policies —
+-- the new ones (contacts_select, …) would error with 42710 "policy
+-- already exists" on a second run. 017 owns every policy on these tables
+-- (no later migration adds others), so drop them all first, then the
+-- CREATEs below re-establish the full set.
+DO $$
+DECLARE
+  pol RECORD;
+BEGIN
+  FOR pol IN
+    SELECT policyname, tablename
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = ANY (ARRAY[
+        'contacts', 'tags', 'custom_fields', 'contact_notes',
+        'conversations', 'whatsapp_config', 'message_templates',
+        'pipelines', 'deals', 'broadcasts', 'automations',
+        'automation_logs', 'flows', 'flow_runs', 'contact_tags',
+        'contact_custom_values', 'messages', 'pipeline_stages',
+        'broadcast_recipients', 'automation_steps', 'flow_nodes',
+        'flow_run_events', 'message_reactions', 'profiles',
+        'accounts', 'account_invitations'
+      ])
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, pol.tablename);
+  END LOOP;
+END $$;
+
 -- ---- contacts ---------------------------------------------------
 DROP POLICY IF EXISTS "Users can manage own contacts" ON contacts;
 CREATE POLICY contacts_select ON contacts FOR SELECT USING (is_account_member(account_id));
